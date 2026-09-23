@@ -1,36 +1,72 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Siliwangi DiSign
 
-## Getting Started
+Website untuk menandatangani dokumen PDF secara digital dan memverifikasi keasliannya melalui SHA-256, ECDSA P-256, dan QR-Code.
 
-First, run the development server:
+## Status
 
-```bash
+MVP awal tersedia: pilih PDF, isi metadata penandatangan, buat signature ECDSA P-256, hasilkan QR payload, unduh `.sig.json`, dan verifikasi ulang dokumen.
+
+Encrypted private-key vault, unlock/reuse, key rotation, QR image/camera decoding, ML-DSA-44 hybrid signing, multi-signer signing, API prototype, Playwright smoke test, and CI are implemented.
+
+Menu utama website:
+
+- `Generate Key`: membuat dan merotasi encrypted key vault.
+- `Sign Dokumen`: signing PDF, metadata, QR, dan `.sig.json`.
+- `Verify`: verifikasi PDF melalui `.sig.json`, QR gambar, atau kamera.
+- `Multi-Signer`: signing dua penandatangan dan hybrid ML-DSA.
+- `Pengujian`: benchmark 30 iterasi dan download laporan JSON/Markdown.
+
+## Menjalankan
+
+```powershell
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Buka `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Validasi lokal:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```powershell
+npm run lint
+npm exec -- tsc --noEmit
+npm run build
+```
 
-## Learn More
+## Demo UTS
 
-To learn more about Next.js, take a look at the following resources:
+1. Pilih sebuah PDF.
+2. Isi nama, jabatan, dan institusi.
+3. Klik `Tandatangani dokumen`.
+4. Simpan QR-Code dan file `.sig.json`.
+5. Klik `Verifikasi` untuk hasil valid.
+6. Ubah satu byte/karakter PDF, pilih berkas hasil perubahan, lalu verifikasi ulang. Hasil harus ditolak karena hash SHA-256 berbeda.
+7. Uji signature dengan public key yang berbeda. Hasil harus ditolak.
+8. Simpan QR sebagai gambar, muat kembali melalui kontrol `Baca QR dari gambar`, lalu verifikasi PDF.
+9. Jalankan benchmark 30 iterasi dan unduh laporan JSON.
+10. Klik `Unduh PDF + QR` untuk membuat salinan PDF baru dengan QR pada halaman pertama.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Keamanan
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Hash dokumen menggunakan SHA-256.
+- Signature MVP menggunakan ECDSA P-256.
+- Randomness disediakan Web Crypto API.
+- Backend prototype only stores verification records in memory; private key is never sent to the server.
+- Encrypted vault disimpan di IndexedDB database browser; password tidak pernah disimpan.
+- Modul vault memakai PBKDF2-SHA-256 dan AES-256-GCM dengan salt/IV acak.
+- QR-Code adalah media payload; keaslian tetap ditentukan oleh pemeriksaan hash dan signature.
+- QR dapat diimport dari gambar dan dipindai melalui kamera jika browser grants permission.
+- Salinan PDF dengan QR dapat dibuat melalui `Unduh PDF + QR`; file ini adalah artefak visual dan hash verifikasi tetap merujuk PDF asli.
+- ML-DSA-44 uses the real `@noble/post-quantum` provider, not a simulated signature.
+- Jangan gunakan hasil MVP untuk dokumen produksi sebelum encrypted private-key vault, parser validation, test tamper, dan audit dependency selesai.
 
-## Deploy on Vercel
+## Anggota
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| Nama | NPM |
+| Ghea Ragil Aulia | 247006111003 |
+| Ristin Iman Andini| 247006111024 |
+| Muhamad Rizky Pratama | 247006111046 |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Struktur proses
+
+Dokumentasi arsitektur, security, QA, dan status pengembangan ada di `.assist/`.

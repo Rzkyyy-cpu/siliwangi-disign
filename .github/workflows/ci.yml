@@ -1,0 +1,34 @@
+name: Siliwangi DiSign CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm exec -- tsc --noEmit
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Scan for secrets and local paths
+        shell: bash
+        run: |
+          if git grep -I -n -E 'BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY|[A-Za-z]:\\Users\\|/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/' -- ':!.git' ':!package-lock.json'; then
+            echo "Potential secret or local path found"
+            exit 1
+          fi
