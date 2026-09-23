@@ -14,14 +14,16 @@ import { readVault, writeVault } from "@/lib/vault/vault-store";
 import { embedQrInPdf } from "@/lib/documents/pdf-qr";
 import { generateMlDsa44KeyPair } from "@/lib/crypto/ml-dsa";
 import { createHybridEnvelope, HybridSignatureEnvelope } from "@/lib/signatures/hybrid-envelope";
-import { createMultiSignerEnvelope, MultiSignerEnvelope } from "@/lib/signatures/multi-signer";
+import { createMultiSignerEnvelope, MultiSignerEnvelope, parseMultiSignerEnvelope } from "@/lib/signatures/multi-signer";
 
 type Menu = "home" | "generate" | "sign" | "verify" | "multi" | "testing";
+type SignerInput = { name: string; role: string; institution: string; password: string };
 
 export default function Home() {
   const [activeMenu, setActiveMenu] = useState<Menu>("home");
   const [file, setFile] = useState<File | null>(null);
   const [envelope, setEnvelope] = useState<SignatureEnvelope | null>(null);
+  const [importedMultiEnvelope, setImportedMultiEnvelope] = useState<MultiSignerEnvelope | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("Belum ada dokumen yang dipilih.");
   const [name, setName] = useState("");
@@ -34,9 +36,7 @@ export default function Home() {
   const [benchmarkReport, setBenchmarkReport] = useState<SignatureBenchmarkReport | null>(null);
   const [hybridEnvelope, setHybridEnvelope] = useState<HybridSignatureEnvelope | null>(null);
   const [multiEnvelope, setMultiEnvelope] = useState<MultiSignerEnvelope | null>(null);
-  const [secondSignerName, setSecondSignerName] = useState("");
-  const [secondSignerRole, setSecondSignerRole] = useState("");
-  const [secondSignerInstitution, setSecondSignerInstitution] = useState("");
+  const [multiSigners, setMultiSigners] = useState<SignerInput[]>([{ name: "", role: "", institution: "", password: "" }]);
   const [cameraOpen, setCameraOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -49,6 +49,7 @@ export default function Home() {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected);
     setEnvelope(null);
+    setImportedMultiEnvelope(null);
     setQrDataUrl(null);
     setStatus(selected ? `${selected.name} siap ditandatangani.` : "Belum ada dokumen yang dipilih.");
   }
@@ -88,14 +89,21 @@ export default function Home() {
   }
 
   async function handleVerify() {
-    if (!file || !envelope) {
+    if (!file || (!envelope && !importedMultiEnvelope)) {
       setStatus("Tandatangani dokumen atau muat signature JSON terlebih dahulu.");
       return;
     }
     setIsBusy(true);
     try {
-      const result = await verifyEnvelope(envelope, new Uint8Array(await file.arrayBuffer()));
-      setStatus(result.valid ? `VALID: ${result.reason}` : `DITOLAK: ${result.reason}`);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (importedMultiEnvelope) {
+        const results = await Promise.all(importedMultiEnvelope.signatures.map((signature) => verifyEnvelope(signature, bytes)));
+        const invalidIndex = results.findIndex((result) => !result.valid);
+        setStatus(invalidIndex === -1 ? `VALID: ${results.length} signature signer valid.` : `DITOLAK: signature signer ${invalidIndex + 1} tidak valid (${results[invalidIndex].reason}).`);
+      } else if (envelope) {
+        const result = await verifyEnvelope(envelope, bytes);
+        setStatus(result.valid ? `VALID: ${result.reason}` : `DITOLAK: ${result.reason}`);
+      }
     } finally {
       setIsBusy(false);
     }
@@ -105,7 +113,18 @@ export default function Home() {
     const signatureFile = event.target.files?.[0];
     if (!signatureFile) return;
     try {
-      setEnvelope(parseEnvelope(await signatureFile.text()));
+      const content = await signatureFile.text();
+      try {
+        const multi = parseMultiSignerEnvelope(content);
+        setImportedMultiEnvelope(multi);
+        setEnvelope(null);
+        setQrDataUrl(null);
+        setStatus(`${multi.signatures.length} signature signer berhasil dimuat. Pilih PDF asli untuk verifikasi.`);
+        return;
+      } catch {
+        setImportedMultiEnvelope(null);
+      }
+      setEnvelope(parseEnvelope(content));
       setQrDataUrl(null);
       setStatus("Signature JSON berhasil dimuat. Pilih PDF asli untuk verifikasi.");
     } catch {
@@ -315,20 +334,27 @@ export default function Home() {
   }
 
   async function handleMultiSign() {
-    if (!file || !name || !role || !institution || !secondSignerName || !secondSignerRole || !secondSignerInstitution) {
-      setStatus("Lengkapi dokumen dan metadata dua penandatangan.");
+    const passwords = multiSigners.map((signer) => signer.password);
+    if (!file || multiSigners.length < 2 || multiSigners.some((signer) => !signer.name || !signer.role || !signer.institution || signer.password.length < 8) || new Set(passwords).size !== passwords.length) {
+      setStatus("Lengkapi minimal dua signer. Setiap password harus minimal 8 karakter dan berbeda.");
       return;
     }
     setIsBusy(true);
     try {
-      const first = await generateKeyPair();
-      const second = await generateKeyPair();
+      const keys = await Promise.all(multiSigners.map(async (signer) => {
+        const generated = await generateKeyPair();
+        const vault = await createEncryptedVault(generated, signer.password);
+        return unlockEncryptedVault(vault, signer.password);
+      }));
       const result = await createMultiSignerEnvelope(file, new Uint8Array(await file.arrayBuffer()), [
-        { privateKey: first.privateKey, publicKey: first.publicKey, metadata: { name, role, institution, signedAt: new Date().toISOString() } },
-        { privateKey: second.privateKey, publicKey: second.publicKey, metadata: { name: secondSignerName, role: secondSignerRole, institution: secondSignerInstitution, signedAt: new Date().toISOString() } },
+        ...keys.map((key, index) => ({
+          privateKey: key.privateKey,
+          publicKey: key.publicKey,
+          metadata: { ...multiSigners[index], signedAt: new Date().toISOString() },
+        })),
       ]);
       setMultiEnvelope(result);
-      setStatus("Dua penandatangan berhasil menandatangani dokumen.");
+      setStatus(`${multiSigners.length} penandatangan berhasil menandatangani dokumen.`);
     } catch {
       setStatus("Multi-signer gagal.");
     } finally {
@@ -341,9 +367,9 @@ export default function Home() {
   }
 
   return (
-    <div className={styles.page}>
+    <div className={`${styles.page} ${activeMenu !== "home" ? styles.nonHomePage : ""}`}>
       <header className={styles.header}><div className={styles.brand}><span className={styles.brandMark}>S</span><span>Siliwangi <b>DiSign</b></span></div><nav className={styles.nav}>{(["home", "generate", "sign", "verify", "multi", "testing"] as Menu[]).map((menu) => <button key={menu} className={activeMenu === menu ? styles.navActive : styles.navButton} onClick={() => setActiveMenu(menu)}>{menuLabel(menu)}</button>)}</nav><span className={styles.secureBadge}>● Local-first security</span></header>
-      <main className={styles.main}>
+      <main className={`${styles.main} ${activeMenu !== "home" ? styles.nonHomeMain : ""}`}>
         {activeMenu === "home" && <section className={styles.hero}><p className={styles.eyebrow}>DIGITAL SIGNATURE WORKSPACE</p><h1>Dokumen resmi,<br /><em>keaslian terbukti.</em></h1><p className={styles.lede}>Tandatangani PDF dengan ECDSA P-256 dan verifikasi integritasnya melalui QR-Code.</p><button className={styles.heroButton} onClick={() => setActiveMenu("sign")}>Mulai sign dokumen →</button></section>}
         {activeMenu === "generate" && <section className={styles.singlePanel}><div className={styles.panelHeading}><span className={styles.step}>KEY</span><div><h2>Generate key</h2><p>Kelola pasangan kunci ECDSA P-256 dan encrypted vault.</p></div></div><p className={styles.status}>Vault tersimpan di database browser: {vaultExists ? "ya" : "belum"}</p><button className={styles.primaryButton} onClick={handleRotateKey}>Rotasi key sekarang</button><p className={styles.note}>Password tidak disimpan. Database hanya menyimpan encrypted vault.</p></section>}
         {activeMenu === "sign" && <div className={styles.workspace}>
@@ -358,7 +384,7 @@ export default function Home() {
             <div className={styles.panelHeading}><span className={styles.step}>03</span><div><h2>Bukti & verifikasi</h2><p>QR membawa payload verifikasi mandiri.</p></div></div>
             <div className={styles.qrFrame}>{qrDataUrl ? <Image src={qrDataUrl} alt="QR-Code signature" width={280} height={280} unoptimized /> : <div className={styles.qrPlaceholder}><span>⌁</span><small>QR-Code akan tampil<br />setelah signing</small></div>}</div>
             {envelope && <div className={styles.proof}><div><span>ALGORITMA</span><strong>ECDSA P-256 / SHA-256</strong></div><div><span>KEY FINGERPRINT</span><strong>{envelope.keyFingerprint}</strong></div></div>}
-            <div className={styles.actions}><button className={styles.secondaryButton} disabled={!file} onClick={downloadDocument}>↓ Unduh PDF</button><button className={styles.verifyButton} disabled={!envelope || !file || isBusy} onClick={handleVerify}>✓ Verifikasi</button></div>
+            <div className={styles.actions}><button className={styles.secondaryButton} disabled={!file} onClick={downloadDocument}>↓ Unduh PDF</button><button className={styles.verifyButton} disabled={(!envelope && !importedMultiEnvelope) || !file || isBusy} onClick={handleVerify}>✓ Verifikasi</button></div>
             <button className={styles.secondaryButton} disabled={!envelope || !qrDataUrl || isBusy} onClick={() => void downloadSignedPdf()}>↓ Unduh PDF + QR</button>
             <button className={styles.secondaryButton} disabled={!envelope} onClick={downloadSignature}>↓ Unduh signature .sig.json</button>
             <label className={styles.importButton}>Muat signature JSON<input type="file" accept="application/json,.json" onChange={handleSignatureImport} /></label>
@@ -371,8 +397,8 @@ export default function Home() {
             <p className={styles.note}>Private key disimpan sebagai ciphertext AES-GCM di browser dan tidak dikirim ke server.</p>
           </section>
         </div>}
-        {activeMenu === "verify" && <section className={styles.singlePanel}><div className={styles.panelHeading}><span className={styles.step}>03</span><div><h2>Verify dokumen</h2><p>Masukkan PDF dan `.sig.json` atau QR-Code, lalu verifikasi integritasnya.</p></div></div><label className={styles.dropzone}><span className={styles.uploadIcon}>↑</span><strong>{file ? file.name : "Pilih PDF untuk diverifikasi"}</strong><small>PDF asli harus cocok dengan hash signature</small><input type="file" accept="application/pdf,.pdf" onChange={handleFile} /></label><label className={styles.importButton}>Muat signature JSON<input type="file" accept="application/json,.json" onChange={handleSignatureImport} /></label><label className={styles.importButton}>Baca QR dari gambar<input type="file" accept="image/*" onChange={handleQrImport} /></label>{cameraOpen && <video ref={videoRef} className={styles.cameraPreview} autoPlay muted playsInline />}<button className={styles.verifyButton} disabled={!file || !envelope || isBusy} onClick={handleVerify}>✓ Verifikasi sekarang</button><p className={styles.status}>{status}</p></section>}
-        {activeMenu === "multi" && <section className={styles.singlePanel}><div className={styles.panelHeading}><span className={styles.step}>MULTI</span><div><h2>Multi-signer & hybrid</h2><p>Tanda tangani satu dokumen dengan dua signer atau ECDSA + ML-DSA.</p></div></div><label className={styles.dropzone}><span className={styles.uploadIcon}>↑</span><strong>{file ? file.name : "Pilih PDF"}</strong><input type="file" accept="application/pdf,.pdf" onChange={handleFile} /></label><div className={styles.formGrid}><label>Signer pertama<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nama signer pertama" /></label><label>Jabatan<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="Jabatan" /></label><label>Institusi<input value={institution} onChange={(event) => setInstitution(event.target.value)} placeholder="Institusi" /></label><label>Signer kedua<input value={secondSignerName} onChange={(event) => setSecondSignerName(event.target.value)} placeholder="Nama signer kedua" /></label><label>Jabatan kedua<input value={secondSignerRole} onChange={(event) => setSecondSignerRole(event.target.value)} placeholder="Jabatan" /></label><label>Institusi kedua<input value={secondSignerInstitution} onChange={(event) => setSecondSignerInstitution(event.target.value)} placeholder="Institusi" /></label></div><div className={styles.actions}><button className={styles.primaryButton} disabled={isBusy} onClick={handleMultiSign}>Sign dengan 2 signer</button><button className={styles.verifyButton} disabled={isBusy} onClick={handleHybridSign}>Sign hybrid ML-DSA</button></div>{multiEnvelope && <button className={styles.secondaryButton} onClick={() => downloadJson(multiEnvelope, "multi-signer.sig.json")}>Unduh multi-signer JSON</button>}{hybridEnvelope && <button className={styles.secondaryButton} onClick={() => downloadJson(hybridEnvelope, "hybrid.sig.json")}>Unduh hybrid JSON</button>}<p className={styles.status}>{status}</p></section>}
+        {activeMenu === "verify" && <section className={styles.singlePanel}><div className={styles.panelHeading}><span className={styles.step}>03</span><div><h2>Verify dokumen</h2><p>Masukkan PDF dan `.sig.json` atau QR-Code, lalu verifikasi integritasnya.</p></div></div><label className={styles.dropzone}><span className={styles.uploadIcon}>↑</span><strong>{file ? file.name : "Pilih PDF untuk diverifikasi"}</strong><small>PDF asli harus cocok dengan hash signature</small><input type="file" accept="application/pdf,.pdf" onChange={handleFile} /></label><label className={styles.importButton}>Muat signature JSON<input type="file" accept="application/json,.json" onChange={handleSignatureImport} /></label><label className={styles.importButton}>Baca QR dari gambar<input type="file" accept="image/*" onChange={handleQrImport} /></label>{cameraOpen && <video ref={videoRef} className={styles.cameraPreview} autoPlay muted playsInline />}<button className={styles.verifyButton} disabled={!file || (!envelope && !importedMultiEnvelope) || isBusy} onClick={handleVerify}>✓ Verifikasi sekarang</button><p className={styles.status}>{status}</p></section>}
+        {activeMenu === "multi" && <section className={styles.singlePanel}><div className={styles.panelHeading}><span className={styles.step}>MULTI</span><div><h2>Multi-signer & hybrid</h2><p>Tambahkan signer satu per satu. Setiap signer memakai password vault yang berbeda.</p></div></div><label className={styles.dropzone}><span className={styles.uploadIcon}>↑</span><strong>{file ? file.name : "Pilih PDF"}</strong><input type="file" accept="application/pdf,.pdf" onChange={handleFile} /></label><div className={styles.formGrid}>{multiSigners.map((signer, index) => <div key={index} className={styles.full}><div className={styles.panelHeading}><span className={styles.step}>{String(index + 1).padStart(2, "0")}</span><div><h2>Signer {index + 1}</h2><p>Isi identitas dan password unik signer ini.</p></div></div><div className={styles.formGrid}><label>Nama<input value={signer.name} onChange={(event) => setMultiSigners((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} placeholder="Nama lengkap" /></label><label>Jabatan<input value={signer.role} onChange={(event) => setMultiSigners((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, role: event.target.value } : item))} placeholder="Jabatan" /></label><label>Institusi<input value={signer.institution} onChange={(event) => setMultiSigners((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, institution: event.target.value } : item))} placeholder="Institusi" /></label><label>Password signer<input type="password" value={signer.password} onChange={(event) => setMultiSigners((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, password: event.target.value } : item))} placeholder="Minimal 8 karakter, unik" /></label></div></div>)}</div><button className={styles.secondaryButton} onClick={() => setMultiSigners((current) => [...current, { name: "", role: "", institution: "", password: "" }])}>+ Tambah signer</button><div className={styles.actions}><button className={styles.primaryButton} disabled={isBusy} onClick={handleMultiSign}>Tandatangani semua signer</button><button className={styles.verifyButton} disabled={isBusy} onClick={handleHybridSign}>Sign hybrid ML-DSA</button></div>{multiEnvelope && <button className={styles.secondaryButton} onClick={() => downloadJson(multiEnvelope, "multi-signer.sig.json")}>Unduh multi-signer JSON</button>}{hybridEnvelope && <button className={styles.secondaryButton} onClick={() => downloadJson(hybridEnvelope, "hybrid.sig.json")}>Unduh hybrid JSON</button>}<p className={styles.status}>{status}</p></section>}
         {activeMenu === "testing" && <section className={styles.singlePanel}><div className={styles.panelHeading}><span className={styles.step}>TEST</span><div><h2>Pengujian & benchmark</h2><p>Ukur signing, verification, ukuran key, dan signature minimal 30 iterasi.</p></div></div><button className={styles.primaryButton} disabled={!file || isBusy} onClick={handleBenchmark}>Jalankan benchmark 30 iterasi</button>{benchmarkReport && <><div className={styles.proof}><div><span>SIGNING AVG</span><strong>{benchmarkReport.signing.averageMs.toFixed(2)} ms</strong></div><div><span>VERIFY AVG</span><strong>{benchmarkReport.verification.averageMs.toFixed(2)} ms</strong></div><div><span>SIGNATURE</span><strong>{benchmarkReport.signatureBytes} bytes</strong></div><div><span>PUBLIC KEY</span><strong>{benchmarkReport.publicKeyBytes} bytes</strong></div></div><button className={styles.secondaryButton} onClick={downloadBenchmark}>Unduh laporan JSON</button><button className={styles.secondaryButton} onClick={downloadBenchmarkMarkdown}>Unduh laporan Markdown</button></>}<p className={styles.status}>{status}</p></section>}
         <div className={styles.footerNote}><span>SHA-256</span><span>ECDSA P-256</span><span>Offline verification ready</span></div>
       </main>
