@@ -5,7 +5,7 @@ const fixture = path.resolve("tests/fixtures/sample.pdf");
 
 test("signing workspace loads and validates required metadata", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("Dokumen resmi,")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Dokumen resmi/ })).toBeVisible();
   await page.getByRole("button", { name: "Sign Dokumen", exact: true }).click();
   await page.locator('input[type="file"]').first().setInputFiles(fixture);
   await page.getByPlaceholder("Nama lengkap").fill("Ayu Siliwangi");
